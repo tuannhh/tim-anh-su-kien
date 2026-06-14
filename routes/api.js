@@ -100,6 +100,9 @@ function canEditEvent(user, ev) {
   return user.role === 'super_admin' || ev.created_by === user.id;
 }
 
+// Phien ban engine (de kiem tra ban deploy da cap nhat chua)
+router.get('/version', (req, res) => res.json({ engine: 'arcface-mbf', build: '2026-06-14-mbf', threshold: FACE_SIM_THRESHOLD }));
+
 // =====================================================================
 //  XAC THUC & DANG NHAP
 // =====================================================================
@@ -313,11 +316,24 @@ router.get('/events/:id/index-status', requireAuth, (req, res) => {
   res.json({ index_status: ev.index_status, index_message: ev.index_message, total_photos: ev.total_photos, faces_indexed: ev.faces_indexed });
 });
 
-// Quet lai khuon mat thu cong (vd: vua bo sung anh)
+// Quet lai khuon mat thu cong (vd: vua bo sung anh) - chi quet anh chua quet
 router.post('/events/:id/index-faces', requireAuth, (req, res) => {
   const ev = db.prepare('SELECT * FROM events WHERE id = ?').get(req.params.id);
   if (!ev) return res.status(404).json({ error: 'Khong tim thay su kien' });
   if (!canEditEvent(req.user, ev)) return res.status(403).json({ error: 'Khong co quyen' });
+  startIndexing(ev.id).catch(() => {});
+  res.json({ ok: true });
+});
+
+// Quet lai TU DAU (xoa het dau van cu + dat lai tat ca ve chua quet) - dung khi doi engine
+router.post('/events/:id/rescan', requireAuth, (req, res) => {
+  const ev = db.prepare('SELECT * FROM events WHERE id = ?').get(req.params.id);
+  if (!ev) return res.status(404).json({ error: 'Khong tim thay su kien' });
+  if (!canEditEvent(req.user, ev)) return res.status(403).json({ error: 'Khong co quyen' });
+  if (indexing.has(ev.id)) return res.status(409).json({ error: 'Dang quet, vui long doi xong roi thu lai.' });
+  db.prepare('DELETE FROM photo_faces WHERE event_id = ?').run(ev.id);
+  db.prepare("UPDATE event_photos SET face_status='pending' WHERE event_id = ?").run(ev.id);
+  db.prepare("UPDATE events SET faces_indexed=0, index_status='idle' WHERE id=?").run(ev.id);
   startIndexing(ev.id).catch(() => {});
   res.json({ ok: true });
 });
