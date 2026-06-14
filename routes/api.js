@@ -101,7 +101,7 @@ function canEditEvent(user, ev) {
 }
 
 // Phien ban engine (de kiem tra ban deploy da cap nhat chua)
-router.get('/version', (req, res) => res.json({ engine: 'arcface-mbf', build: '2026-06-14-mbf', threshold: FACE_SIM_THRESHOLD }));
+router.get('/version', (req, res) => res.json({ engine: 'scrfd+arcface-mbf', build: '2026-06-15-scrfd', threshold: FACE_SIM_THRESHOLD }));
 
 // =====================================================================
 //  XAC THUC & DANG NHAP

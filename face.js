@@ -1,90 +1,126 @@
-// Nhan dien khuon mat = face-api (tim mat + 68 diem moc) + ArcFace/InsightFace (vector danh tinh 512 chieu).
-// ArcFace phan biet DUNG DANH TINH (khong nham theo hinh dang mat) -> chinh xac cao. Chay qua ONNX trong Node.
+// Nhan dien khuon mat HOAN TOAN bang ONNX native (nhanh, da luong that):
+//   - SCRFD: do tim khuon mat + 5 diem moc
+//   - ArcFace (MobileFaceNet): vector danh tinh 512 chieu
+// Khong con phu thuoc face-api/tfjs (WASM cham).
 const path = require('path');
 const fs = require('fs');
 const sharp = require('sharp');
-const { DATA_DIR } = require('./config');
-const faceapi = require('@vladmandic/face-api/dist/face-api.node-wasm.js');
-const { setWasmPaths } = require('@tensorflow/tfjs-backend-wasm');
 const ort = require('onnxruntime-node');
-const tf = faceapi.tf;
+const { DATA_DIR } = require('./config');
 
-// Diem moc chuan cua ArcFace tren anh 112x112 (mat trai, mat phai, mui, mep trai, mep phai)
-const ARC_TEMPLATE = [
-  [38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366], [41.5493, 92.3655], [70.7299, 92.2041],
-];
-const ARC_SIZE = 112;
-const WORK_SIZE = 1280; // anh lam viec (tim mat + cat mat) - du lon de mat trong anh nhom van ro
-
-// Mo hinh ArcFace khong luu trong git (gitignore models/*.onnx) -> tu tai khi chay lan dau.
-const ARC_MODELS = {
-  'arcface_w600k_r50.onnx': { url: 'https://huggingface.co/immich-app/buffalo_l/resolve/main/recognition/model.onnx?download=true', minSize: 1e8 },
+// ===== Model tu tai khi chay lan dau (khong luu trong git) =====
+const MODELS = {
+  'scrfd_10g.onnx': { url: 'https://huggingface.co/immich-app/buffalo_l/resolve/main/detection/model.onnx?download=true', minSize: 1e7 },
   'arcface_mbf.onnx': { url: 'https://huggingface.co/immich-app/buffalo_s/resolve/main/recognition/model.onnx?download=true', minSize: 1e7 },
+  'arcface_w600k_r50.onnx': { url: 'https://huggingface.co/immich-app/buffalo_l/resolve/main/recognition/model.onnx?download=true', minSize: 1e8 },
 };
-async function ensureArcModel(file, name) {
-  const cfg = ARC_MODELS[name];
+async function ensureModel(name) {
+  const local = path.join(__dirname, 'models', name);
+  const target = fs.existsSync(local) ? local : path.join(DATA_DIR, name);
+  const cfg = MODELS[name];
   const minSize = cfg ? cfg.minSize : 1e6;
-  if (fs.existsSync(file) && fs.statSync(file).size > minSize) return; // da co
+  if (fs.existsSync(target) && fs.statSync(target).size > minSize) return target;
   if (!cfg) throw new Error('Khong biet nguon tai mo hinh: ' + name);
-  console.log(`… Dang tai mo hinh nhan dien (${name}) lan dau, vui long doi...`);
+  console.log(`… Dang tai mo hinh ${name} lan dau, vui long doi...`);
   const res = await fetch(cfg.url);
   if (!res.ok) throw new Error('Tai mo hinh that bai: ' + res.status);
-  const tmp = file + '.part';
+  const tmp = target + '.part';
   fs.writeFileSync(tmp, Buffer.from(await res.arrayBuffer()));
-  fs.renameSync(tmp, file);
+  fs.renameSync(tmp, target);
   console.log('✔ Da tai xong mo hinh ' + name);
+  return target;
 }
 
-let loaded = null, arcSession = null;
+const SESS_OPT = { intraOpNumThreads: 0, graphOptimizationLevel: 'all', executionMode: 'sequential' };
+let loaded = null, detSession = null, recSession = null;
 function loadModels() {
   if (loaded) return loaded;
   loaded = (async () => {
-    setWasmPaths(path.join(path.dirname(require.resolve('@tensorflow/tfjs-backend-wasm')), path.sep));
-    await tf.setBackend('wasm');
-    await tf.ready();
-    const dir = path.join(__dirname, 'models');
-    await faceapi.nets.ssdMobilenetv1.loadFromDisk(dir);
-    await faceapi.nets.faceLandmark68Net.loadFromDisk(dir);
-    // Uu tien file co san trong models/ (may local); neu khong co (cloud) thi tai ve DATA_DIR (volume - giu lau dai)
-    // Mac dinh dung ban nhe mbf (MobileFaceNet): nhanh hon nhieu tren CPU yeu, do chinh xac van rat tot.
-    const arcName = process.env.ARC_MODEL || 'arcface_mbf.onnx';
-    const localArc = path.join(dir, arcName);
-    const arcFile = fs.existsSync(localArc) ? localArc : path.join(DATA_DIR, arcName);
-    await ensureArcModel(arcFile, arcName);
-    // Toi uu toc do: dung het loi CPU + toi uu do thi
-    arcSession = await ort.InferenceSession.create(arcFile, {
-      intraOpNumThreads: 0,            // 0 = tu dong dung so loi CPU co san
-      graphOptimizationLevel: 'all',
-      executionMode: 'sequential',
-    });
-    console.log('✔ Da nap engine nhan dien khuon mat (ArcFace)');
+    const recName = process.env.ARC_MODEL || 'arcface_mbf.onnx';
+    detSession = await ort.InferenceSession.create(await ensureModel('scrfd_10g.onnx'), SESS_OPT);
+    recSession = await ort.InferenceSession.create(await ensureModel(recName), SESS_OPT);
+    console.log('✔ Da nap engine nhan dien khuon mat (SCRFD + ArcFace)');
   })();
   return loaded;
 }
 
-const options = new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 });
+// ===== SCRFD: do tim khuon mat =====
+const DET_SIZE = 640, DET_THRESH = 0.5, NMS_IOU = 0.4, STRIDES = [8, 16, 32], NUM_ANCHORS = 2;
 
-// 5 diem tu 68 diem moc dlib/face-api
-function five(pos) {
-  const mean = (a, b) => { let x = 0, y = 0; for (let i = a; i <= b; i++) { x += pos[i].x; y += pos[i].y; } const n = b - a + 1; return [x / n, y / n]; };
-  return [mean(36, 41), mean(42, 47), [pos[30].x, pos[30].y], [pos[48].x, pos[48].y], [pos[54].x, pos[54].y]];
+// Doc anh -> RGB raw o kich thuoc lam viec (ton trong EXIF)
+async function workImage(buf, maxSize = 1280) {
+  const { data, info } = await sharp(buf).rotate().removeAlpha()
+    .resize({ width: maxSize, height: maxSize, fit: 'inside', withoutEnlargement: true })
+    .raw().toBuffer({ resolveWithObject: true });
+  return { rgb: data, W: info.width, H: info.height };
 }
 
-// Bien doi tuong tu (scale+xoay+tinh tien) bang binh phuong toi thieu: from -> to.
-// Tra ve [a,b,tx,ty] voi: x' = a*x - b*y + tx ; y' = b*x + a*y + ty
-function solveSimilarity(from, to) {
-  const A = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-  const B = [0, 0, 0, 0];
-  const add = (row, rhs) => { for (let i = 0; i < 4; i++) { for (let j = 0; j < 4; j++) A[i][j] += row[i] * row[j]; B[i] += row[i] * rhs; } };
-  for (let i = 0; i < from.length; i++) {
-    const [x, y] = from[i], [xp, yp] = to[i];
-    add([x, -y, 1, 0], xp);
-    add([y, x, 0, 1], yp);
+function iou(a, b) {
+  const ax2 = a[0] + a[2], ay2 = a[1] + a[3], bx2 = b[0] + b[2], by2 = b[1] + b[3];
+  const ix1 = Math.max(a[0], b[0]), iy1 = Math.max(a[1], b[1]), ix2 = Math.min(ax2, bx2), iy2 = Math.min(ay2, by2);
+  const iw = Math.max(0, ix2 - ix1), ih = Math.max(0, iy2 - iy1);
+  const inter = iw * ih, uni = a[2] * a[3] + b[2] * b[3] - inter;
+  return uni <= 0 ? 0 : inter / uni;
+}
+function nms(faces) {
+  faces.sort((a, b) => b.score - a.score);
+  const keep = [], sup = new Array(faces.length).fill(false);
+  for (let i = 0; i < faces.length; i++) {
+    if (sup[i]) continue;
+    keep.push(faces[i]);
+    for (let j = i + 1; j < faces.length; j++) if (!sup[j] && iou(faces[i].box, faces[j].box) > NMS_IOU) sup[j] = true;
   }
-  return solve4(A, B);
+  return keep;
 }
-function solve4(A, b) {
-  const M = A.map((r, i) => [...r, b[i]]);
+
+// Tra ve mang khuon mat: {score, box:[x,y,w,h], kps:[[x,y]x5]} theo toa do anh lam viec (W,H)
+async function detect(rgb, W, H) {
+  const scale = Math.min(DET_SIZE / W, DET_SIZE / H);
+  // letterbox ve 640x640, can goc trai-tren (pad phai/duoi)
+  const det = await sharp(Buffer.from(rgb), { raw: { width: W, height: H, channels: 3 } })
+    .resize(DET_SIZE, DET_SIZE, { fit: 'contain', position: 'left top', background: { r: 0, g: 0, b: 0 } })
+    .raw().toBuffer();
+  const plane = DET_SIZE * DET_SIZE;
+  const input = new Float32Array(3 * plane);
+  for (let i = 0; i < plane; i++) {
+    input[i] = (det[i * 3] - 127.5) / 128;
+    input[plane + i] = (det[i * 3 + 1] - 127.5) / 128;
+    input[2 * plane + i] = (det[i * 3 + 2] - 127.5) / 128;
+  }
+  const t = new ort.Tensor('float32', input, [1, 3, DET_SIZE, DET_SIZE]);
+  const out = await detSession.run({ [detSession.inputNames[0]]: t });
+  const names = detSession.outputNames; // 0-2 score, 3-5 bbox, 6-8 kps (theo stride 8,16,32)
+
+  const faces = [];
+  for (let s = 0; s < 3; s++) {
+    const stride = STRIDES[s];
+    const scores = out[names[s]].data, bbox = out[names[s + 3]].data, kps = out[names[s + 6]].data;
+    const gw = Math.ceil(DET_SIZE / stride), gh = Math.ceil(DET_SIZE / stride);
+    let idx = 0;
+    for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) for (let a = 0; a < NUM_ANCHORS; a++) {
+      if (scores[idx] >= DET_THRESH) {
+        const cx = x * stride, cy = y * stride, b4 = idx * 4, k10 = idx * 10;
+        const x1 = (cx - bbox[b4] * stride) / scale, y1 = (cy - bbox[b4 + 1] * stride) / scale;
+        const x2 = (cx + bbox[b4 + 2] * stride) / scale, y2 = (cy + bbox[b4 + 3] * stride) / scale;
+        const pts = [];
+        for (let j = 0; j < 5; j++) pts.push([(cx + kps[k10 + 2 * j] * stride) / scale, (cy + kps[k10 + 2 * j + 1] * stride) / scale]);
+        faces.push({ score: scores[idx], box: [x1, y1, x2 - x1, y2 - y1], kps: pts });
+      }
+      idx++;
+    }
+  }
+  return nms(faces);
+}
+
+// ===== ArcFace: can chinh 5 diem -> 112x112 -> vector 512 =====
+const ARC_TEMPLATE = [[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366], [41.5493, 92.3655], [70.7299, 92.2041]];
+const ARC_SIZE = 112;
+
+function solveSimilarity(from, to) {
+  const A = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]], B = [0, 0, 0, 0];
+  const add = (row, rhs) => { for (let i = 0; i < 4; i++) { for (let j = 0; j < 4; j++) A[i][j] += row[i] * row[j]; B[i] += row[i] * rhs; } };
+  for (let i = 0; i < from.length; i++) { const [x, y] = from[i], [xp, yp] = to[i]; add([x, -y, 1, 0], xp); add([y, x, 0, 1], yp); }
+  const M = A.map((r, i) => [...r, B[i]]);
   for (let c = 0; c < 4; c++) {
     let p = c; for (let r = c + 1; r < 4; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
     [M[c], M[p]] = [M[p], M[c]];
@@ -93,29 +129,20 @@ function solve4(A, b) {
   return [M[0][4] / M[0][0], M[1][4] / M[1][1], M[2][4] / M[2][2], M[3][4] / M[3][3]];
 }
 
-// Cat & can chinh khuon mat ve 112x112 roi tien xu ly cho ArcFace (RGB, (v-127.5)/127.5, NCHW)
 function alignToInput(rgb, W, H, pts5) {
-  // transform template -> diem mat that (de lay nguoc cho moi pixel dau ra)
   const [a, b, tx, ty] = solveSimilarity(ARC_TEMPLATE, pts5);
-  const out = new Float32Array(3 * ARC_SIZE * ARC_SIZE);
-  const plane = ARC_SIZE * ARC_SIZE;
-  for (let oy = 0; oy < ARC_SIZE; oy++) {
-    for (let ox = 0; ox < ARC_SIZE; ox++) {
-      const sx = a * ox - b * oy + tx;
-      const sy = b * ox + a * oy + ty;
-      // bilinear
-      const x0 = Math.floor(sx), y0 = Math.floor(sy);
-      const x1 = x0 + 1, y1 = y0 + 1;
-      const fx = sx - x0, fy = sy - y0;
-      const cx0 = Math.min(Math.max(x0, 0), W - 1), cx1 = Math.min(Math.max(x1, 0), W - 1);
-      const cy0 = Math.min(Math.max(y0, 0), H - 1), cy1 = Math.min(Math.max(y1, 0), H - 1);
-      const o = oy * ARC_SIZE + ox;
-      for (let ch = 0; ch < 3; ch++) {
-        const p00 = rgb[(cy0 * W + cx0) * 3 + ch], p10 = rgb[(cy0 * W + cx1) * 3 + ch];
-        const p01 = rgb[(cy1 * W + cx0) * 3 + ch], p11 = rgb[(cy1 * W + cx1) * 3 + ch];
-        const v = p00 * (1 - fx) * (1 - fy) + p10 * fx * (1 - fy) + p01 * (1 - fx) * fy + p11 * fx * fy;
-        out[ch * plane + o] = (v - 127.5) / 127.5;
-      }
+  const out = new Float32Array(3 * ARC_SIZE * ARC_SIZE), plane = ARC_SIZE * ARC_SIZE;
+  for (let oy = 0; oy < ARC_SIZE; oy++) for (let ox = 0; ox < ARC_SIZE; ox++) {
+    const sx = a * ox - b * oy + tx, sy = b * ox + a * oy + ty;
+    const x0 = Math.floor(sx), y0 = Math.floor(sy), fx = sx - x0, fy = sy - y0;
+    const cx0 = Math.min(Math.max(x0, 0), W - 1), cx1 = Math.min(Math.max(x0 + 1, 0), W - 1);
+    const cy0 = Math.min(Math.max(y0, 0), H - 1), cy1 = Math.min(Math.max(y0 + 1, 0), H - 1);
+    const o = oy * ARC_SIZE + ox;
+    for (let ch = 0; ch < 3; ch++) {
+      const p00 = rgb[(cy0 * W + cx0) * 3 + ch], p10 = rgb[(cy0 * W + cx1) * 3 + ch];
+      const p01 = rgb[(cy1 * W + cx0) * 3 + ch], p11 = rgb[(cy1 * W + cx1) * 3 + ch];
+      const v = p00 * (1 - fx) * (1 - fy) + p10 * fx * (1 - fy) + p01 * (1 - fx) * fy + p11 * fx * fy;
+      out[ch * plane + o] = (v - 127.5) / 127.5;
     }
   }
   return out;
@@ -123,22 +150,11 @@ function alignToInput(rgb, W, H, pts5) {
 
 async function arcEmbed(inputData) {
   const t = new ort.Tensor('float32', inputData, [1, 3, ARC_SIZE, ARC_SIZE]);
-  const feeds = {}; feeds[arcSession.inputNames[0]] = t;
-  const res = await arcSession.run(feeds);
-  const v = res[arcSession.outputNames[0]].data; // Float32Array(512)
-  // L2 normalize -> dung cosine similarity
-  let n = 0; for (let i = 0; i < v.length; i++) n += v[i] * v[i];
-  n = Math.sqrt(n) || 1;
+  const res = await recSession.run({ [recSession.inputNames[0]]: t });
+  const v = res[recSession.outputNames[0]].data;
+  let n = 0; for (let i = 0; i < v.length; i++) n += v[i] * v[i]; n = Math.sqrt(n) || 1;
   const out = new Float32Array(v.length); for (let i = 0; i < v.length; i++) out[i] = v[i] / n;
   return out;
-}
-
-// Doc anh -> {rgb, W, H} o kich thuoc lam viec, ton trong huong EXIF
-async function workImage(buf) {
-  const { data, info } = await sharp(buf).rotate().removeAlpha()
-    .resize({ width: WORK_SIZE, height: WORK_SIZE, fit: 'inside', withoutEnlargement: true })
-    .raw().toBuffer({ resolveWithObject: true });
-  return { rgb: data, W: info.width, H: info.height };
 }
 
 const MIN_FACE = 26; // bo qua mat qua nho (vector khong dang tin)
@@ -147,34 +163,27 @@ const MIN_FACE = 26; // bo qua mat qua nho (vector khong dang tin)
 async function getDescriptors(buf) {
   await loadModels();
   const { rgb, W, H } = await workImage(buf);
-  const t = tf.tensor3d(new Uint8Array(rgb), [H, W, 3]);
-  let dets;
-  try { dets = await faceapi.detectAllFaces(t, options).withFaceLandmarks(); }
-  finally { t.dispose(); }
+  const faces = await detect(rgb, W, H);
   const out = [];
-  for (const d of dets) {
-    if (d.detection.box.width < MIN_FACE || d.detection.box.height < MIN_FACE) continue;
-    out.push(await arcEmbed(alignToInput(rgb, W, H, five(d.landmarks.positions))));
+  for (const f of faces) {
+    if (f.box[2] < MIN_FACE || f.box[3] < MIN_FACE) continue;
+    out.push(await arcEmbed(alignToInput(rgb, W, H, f.kps)));
   }
   return out;
 }
 
-// Mot khuon mat ro nhat (anh chan dung khach upload) -> Float32Array(512) hoac null
+// Mot khuon mat LON nhat (anh chan dung khach upload) -> Float32Array(512) hoac null
 async function getSingleDescriptor(buf) {
   await loadModels();
   const { rgb, W, H } = await workImage(buf);
-  const t = tf.tensor3d(new Uint8Array(rgb), [H, W, 3]);
-  let d;
-  try { d = await faceapi.detectSingleFace(t, options).withFaceLandmarks(); }
-  finally { t.dispose(); }
-  if (!d) return null;
-  return arcEmbed(alignToInput(rgb, W, H, five(d.landmarks.positions)));
+  const faces = await detect(rgb, W, H);
+  if (!faces.length) return null;
+  faces.sort((a, b) => b.box[2] * b.box[3] - a.box[2] * a.box[3]); // lon nhat = chu the chinh
+  return arcEmbed(alignToInput(rgb, W, H, faces[0].kps));
 }
 
-// Do giong nhau cosine giua 2 vector da chuan hoa (cang LON cang giong, toi da 1.0)
+// Do giong cosine giua 2 vector da chuan hoa (cang LON cang giong)
 function similarity(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
-
-// BLOB <-> Float32Array
 const descToBlob = (d) => Buffer.from(new Float32Array(d).buffer);
 const blobToDesc = (b) => new Float32Array(b.buffer, b.byteOffset, b.byteLength / 4);
 
