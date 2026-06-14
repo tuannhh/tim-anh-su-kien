@@ -23,17 +23,32 @@ const indexing = new Set(); // id su kien dang chay
 async function startIndexing(eventId) {
   if (indexing.has(eventId)) return;
   indexing.add(eventId);
-  db.prepare("UPDATE events SET index_status='indexing', index_message='Bat dau quet khuon mat...' WHERE id=?").run(eventId);
   try {
+    // Nap engine truoc (lan dau co the tai mo hinh 174MB) - bao ro cho nguoi dung biet dang lam gi
+    db.prepare("UPDATE events SET index_status='indexing', index_message='Đang chuẩn bị engine AI (lần đầu tải mô hình, ~1 phút)...' WHERE id=?").run(eventId);
+    await face.loadModels();
+
     const insFace = db.prepare('INSERT INTO photo_faces (event_id, photo_id, descriptor) VALUES (?,?,?)');
     const setDone = db.prepare("UPDATE event_photos SET face_status=? WHERE id=?");
-    while (true) {
-      const p = db.prepare("SELECT * FROM event_photos WHERE event_id=? AND face_status='pending' ORDER BY sort, id LIMIT 1").get(eventId);
-      if (!p) break;
+    const total = db.prepare('SELECT COUNT(*) n FROM event_photos WHERE event_id=?').get(eventId).n;
+    const photos = db.prepare("SELECT id, drive_file_id FROM event_photos WHERE event_id=? AND face_status='pending' ORDER BY sort, id").all(eventId);
+
+    // Tai anh song song (prefetch) de chong thoi gian mang len luc CPU xu ly -> nhanh hon
+    const PREFETCH = 5;
+    const dl = (p) => fetch(drive.thumbUrl(p.drive_file_id, 1024), { redirect: 'follow' })
+      .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error('tai anh loi ' + r.status))))
+      .then((a) => Buffer.from(a));
+    const inflight = new Array(photos.length);
+    const startFetch = (i) => { if (i < photos.length) inflight[i] = dl(photos[i]).catch(() => null); };
+    for (let i = 0; i < Math.min(PREFETCH, photos.length); i++) startFetch(i);
+
+    let done = db.prepare("SELECT COUNT(*) n FROM event_photos WHERE event_id=? AND face_status IN ('done','nofocus','error')").get(eventId).n;
+    for (let i = 0; i < photos.length; i++) {
+      const p = photos[i];
+      const buf = await inflight[i]; inflight[i] = null;
+      startFetch(i + PREFETCH); // giu hang doi tai luon day
       try {
-        const r = await fetch(drive.thumbUrl(p.drive_file_id, 1024), { redirect: 'follow' });
-        if (!r.ok) throw new Error('tai anh loi ' + r.status);
-        const buf = Buffer.from(await r.arrayBuffer());
+        if (!buf) throw new Error('khong tai duoc anh');
         const descs = await face.getDescriptors(buf);
         const tx = db.transaction(() => {
           for (const d of descs) insFace.run(eventId, p.id, face.descToBlob(d));
@@ -43,14 +58,12 @@ async function startIndexing(eventId) {
       } catch (e) {
         setDone.run('error', p.id);
       }
-      const cnt = db.prepare("SELECT COUNT(*) n FROM event_photos WHERE event_id=? AND face_status IN ('done','nofocus','error')").get(eventId).n;
-      const total = db.prepare('SELECT COUNT(*) n FROM event_photos WHERE event_id=?').get(eventId).n;
-      db.prepare("UPDATE events SET faces_indexed=?, index_message=? WHERE id=?").run(cnt, `Da quet ${cnt}/${total} anh`, eventId);
+      done++;
+      db.prepare("UPDATE events SET faces_indexed=?, index_message=? WHERE id=?").run(done, `Đã quét ${done}/${total} ảnh`, eventId);
     }
-    const total = db.prepare('SELECT COUNT(*) n FROM event_photos WHERE event_id=?').get(eventId).n;
-    db.prepare("UPDATE events SET index_status='done', index_message=? WHERE id=?").run(`Hoan tat: da quet ${total} anh.`, eventId);
+    db.prepare("UPDATE events SET index_status='done', index_message=? WHERE id=?").run(`Hoàn tất: đã quét ${total} ảnh.`, eventId);
   } catch (e) {
-    db.prepare("UPDATE events SET index_status='error', index_message=? WHERE id=?").run('Loi quet khuon mat: ' + e.message, eventId);
+    db.prepare("UPDATE events SET index_status='error', index_message=? WHERE id=?").run('Lỗi quét khuôn mặt: ' + e.message, eventId);
   } finally {
     indexing.delete(eventId);
   }

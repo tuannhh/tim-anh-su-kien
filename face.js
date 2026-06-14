@@ -44,7 +44,12 @@ function loadModels() {
     const localArc = path.join(dir, 'arcface_w600k_r50.onnx');
     const arcFile = fs.existsSync(localArc) ? localArc : path.join(DATA_DIR, 'arcface_w600k_r50.onnx');
     await ensureArcModel(arcFile);
-    arcSession = await ort.InferenceSession.create(arcFile);
+    // Toi uu toc do: dung het loi CPU + toi uu do thi
+    arcSession = await ort.InferenceSession.create(arcFile, {
+      intraOpNumThreads: 0,            // 0 = tu dong dung so loi CPU co san
+      graphOptimizationLevel: 'all',
+      executionMode: 'sequential',
+    });
     console.log('✔ Da nap engine nhan dien khuon mat (ArcFace)');
   })();
   return loaded;
