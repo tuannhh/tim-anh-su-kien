@@ -14,9 +14,9 @@ const face = require('../face');
 
 const router = express.Router();
 
-// Nguong do GIONG cosine cua ArcFace (cang LON cang giong). Tu 0..1.
-// >= 0.40 thuong la cung mot nguoi; nguoi khac thap hon ro ret. Cang cao cang chat.
-const FACE_SIM_THRESHOLD = 0.42;
+// Nguong do GIONG cosine cua ArcFace MobileFaceNet (cang LON cang giong). Tu 0..1.
+// Do thuc te: cung nguoi >=0.54, nguoi khac <=0.29 -> 0.40 tach sach, du bien an toan.
+const FACE_SIM_THRESHOLD = 0.40;
 
 // ===== Danh chi muc khuon mat chay nen (1 job/su kien) =====
 const indexing = new Set(); // id su kien dang chay

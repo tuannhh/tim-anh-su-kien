@@ -16,18 +16,23 @@ const ARC_TEMPLATE = [
 const ARC_SIZE = 112;
 const WORK_SIZE = 1280; // anh lam viec (tim mat + cat mat) - du lon de mat trong anh nhom van ro
 
-// Mo hinh ArcFace nang 174MB (vuot gioi han GitHub) -> tu tai khi chay lan dau, khong luu trong git.
-const ARC_URL = 'https://huggingface.co/immich-app/buffalo_l/resolve/main/recognition/model.onnx?download=true';
-async function ensureArcModel(file) {
-  if (fs.existsSync(file) && fs.statSync(file).size > 1e8) return; // da co (>100MB)
-  console.log('… Dang tai mo hinh ArcFace (~174MB) lan dau, vui long doi...');
-  const res = await fetch(ARC_URL);
-  if (!res.ok) throw new Error('Tai mo hinh ArcFace that bai: ' + res.status);
+// Mo hinh ArcFace khong luu trong git (gitignore models/*.onnx) -> tu tai khi chay lan dau.
+const ARC_MODELS = {
+  'arcface_w600k_r50.onnx': { url: 'https://huggingface.co/immich-app/buffalo_l/resolve/main/recognition/model.onnx?download=true', minSize: 1e8 },
+  'arcface_mbf.onnx': { url: 'https://huggingface.co/immich-app/buffalo_s/resolve/main/recognition/model.onnx?download=true', minSize: 1e7 },
+};
+async function ensureArcModel(file, name) {
+  const cfg = ARC_MODELS[name];
+  const minSize = cfg ? cfg.minSize : 1e6;
+  if (fs.existsSync(file) && fs.statSync(file).size > minSize) return; // da co
+  if (!cfg) throw new Error('Khong biet nguon tai mo hinh: ' + name);
+  console.log(`… Dang tai mo hinh nhan dien (${name}) lan dau, vui long doi...`);
+  const res = await fetch(cfg.url);
+  if (!res.ok) throw new Error('Tai mo hinh that bai: ' + res.status);
   const tmp = file + '.part';
-  const buf = Buffer.from(await res.arrayBuffer());
-  fs.writeFileSync(tmp, buf);
+  fs.writeFileSync(tmp, Buffer.from(await res.arrayBuffer()));
   fs.renameSync(tmp, file);
-  console.log('✔ Da tai xong mo hinh ArcFace');
+  console.log('✔ Da tai xong mo hinh ' + name);
 }
 
 let loaded = null, arcSession = null;
@@ -41,9 +46,11 @@ function loadModels() {
     await faceapi.nets.ssdMobilenetv1.loadFromDisk(dir);
     await faceapi.nets.faceLandmark68Net.loadFromDisk(dir);
     // Uu tien file co san trong models/ (may local); neu khong co (cloud) thi tai ve DATA_DIR (volume - giu lau dai)
-    const localArc = path.join(dir, 'arcface_w600k_r50.onnx');
-    const arcFile = fs.existsSync(localArc) ? localArc : path.join(DATA_DIR, 'arcface_w600k_r50.onnx');
-    await ensureArcModel(arcFile);
+    // Mac dinh dung ban nhe mbf (MobileFaceNet): nhanh hon nhieu tren CPU yeu, do chinh xac van rat tot.
+    const arcName = process.env.ARC_MODEL || 'arcface_mbf.onnx';
+    const localArc = path.join(dir, arcName);
+    const arcFile = fs.existsSync(localArc) ? localArc : path.join(DATA_DIR, arcName);
+    await ensureArcModel(arcFile, arcName);
     // Toi uu toc do: dung het loi CPU + toi uu do thi
     arcSession = await ort.InferenceSession.create(arcFile, {
       intraOpNumThreads: 0,            // 0 = tu dong dung so loi CPU co san
