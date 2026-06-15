@@ -559,9 +559,14 @@ function eventForm(ev) {
   const removePw = isEdit && ev.has_password ? h('label', { style: 'font-weight:500;display:flex;gap:8px;align-items:center;margin-top:8px' }, h('input', { type: 'checkbox', style: 'width:auto', id: 'rmpw' }), 'Bỏ mật khẩu sự kiện này') : null;
   const err = h('div', { class: 'error-msg' });
 
+  const saveBtn = h('button', { class: 'btn', onclick: save }, 'Lưu');
+
   async function save() {
     err.textContent = '';
     if (!name.value.trim() || !date.value) { err.textContent = 'Cần nhập Tên sự kiện và Ngày diễn ra.'; return; }
+    // Khóa nút ngay để tránh bấm nhiều lần -> tạo sự kiện trùng lặp
+    if (saveBtn.disabled) return;
+    saveBtn.disabled = true; saveBtn.textContent = 'Đang lưu...';
     const fd = new FormData();
     fd.append('name', name.value.trim());
     fd.append('event_date', date.value);
@@ -578,7 +583,7 @@ function eventForm(ev) {
       // Gợi ý đồng bộ ảnh nếu có link Drive
       if (drive.value.trim()) syncEvent(ev.id, true);
       else viewDashboard();
-    } catch (e) { err.textContent = e.message; }
+    } catch (e) { err.textContent = e.message; saveBtn.disabled = false; saveBtn.textContent = 'Lưu'; }
   }
 
   const m = h('div', { class: 'modal wide' },
@@ -598,7 +603,7 @@ function eventForm(ev) {
     err,
     h('div', { class: 'modal-actions' },
       h('button', { class: 'btn secondary', onclick: closeModal }, 'Hủy'),
-      h('button', { class: 'btn', onclick: save }, 'Lưu')));
+      saveBtn));
   openModal(m);
 }
 

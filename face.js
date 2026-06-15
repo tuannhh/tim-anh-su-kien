@@ -31,12 +31,13 @@ async function ensureModel(name) {
   return target;
 }
 
-const SESS_OPT = { intraOpNumThreads: 0, graphOptimizationLevel: 'all', executionMode: 'sequential' };
+const SESS_OPT = { intraOpNumThreads: 0, graphOptimizationLevel: 'all', executionMode: 'sequential', logSeverityLevel: 3 };
 let loaded = null, detSession = null, recSession = null;
 function loadModels() {
   if (loaded) return loaded;
   loaded = (async () => {
-    const recName = process.env.ARC_MODEL || 'arcface_mbf.onnx';
+    // r50 (buffalo_l) chinh xac hon mbf - khop danh tinh tot hon o nhieu goc mat. Doi qua env ARC_MODEL.
+    const recName = process.env.ARC_MODEL || 'arcface_w600k_r50.onnx';
     detSession = await ort.InferenceSession.create(await ensureModel('scrfd_10g.onnx'), SESS_OPT);
     recSession = await ort.InferenceSession.create(await ensureModel(recName), SESS_OPT);
     console.log('✔ Da nap engine nhan dien khuon mat (SCRFD + ArcFace)');
@@ -45,10 +46,14 @@ function loadModels() {
 }
 
 // ===== SCRFD: do tim khuon mat =====
-const DET_SIZE = 640, DET_THRESH = 0.5, NMS_IOU = 0.4, STRIDES = [8, 16, 32], NUM_ANCHORS = 2;
+// DET_SIZE lon hon => detector "nhin" ro hon, bat duoc ca mat nho/o xa trong anh tap the.
+// WORK_SIZE: do phan giai anh lam viec (cang lon cang ro mat nho, nhung cham hon). Deu chinh duoc qua env.
+const DET_SIZE = +process.env.DET_SIZE || 1024, DET_THRESH = +process.env.DET_THRESH || 0.4;
+const WORK_SIZE = +process.env.WORK_SIZE || 2048;
+const NMS_IOU = 0.4, STRIDES = [8, 16, 32], NUM_ANCHORS = 2;
 
 // Doc anh -> RGB raw o kich thuoc lam viec (ton trong EXIF)
-async function workImage(buf, maxSize = 1280) {
+async function workImage(buf, maxSize = WORK_SIZE) {
   const { data, info } = await sharp(buf).rotate().removeAlpha()
     .resize({ width: maxSize, height: maxSize, fit: 'inside', withoutEnlargement: true })
     .raw().toBuffer({ resolveWithObject: true });
@@ -157,7 +162,7 @@ async function arcEmbed(inputData) {
   return out;
 }
 
-const MIN_FACE = 26; // bo qua mat qua nho (vector khong dang tin)
+const MIN_FACE = +process.env.MIN_FACE || 16; // bo qua mat qua nho (vector khong dang tin)
 
 // Tat ca khuon mat trong 1 anh -> mang Float32Array(512) da chuan hoa
 async function getDescriptors(buf) {

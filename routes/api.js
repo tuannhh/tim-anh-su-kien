@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const archiver = require('archiver');
+const sharp = require('sharp');
 const { Readable } = require('stream');
 const db = require('../db');
 const { UPLOAD_DIR } = require('../config');
@@ -14,9 +15,11 @@ const face = require('../face');
 
 const router = express.Router();
 
-// Nguong do GIONG cosine cua ArcFace MobileFaceNet (cang LON cang giong). Tu 0..1.
-// Do thuc te: cung nguoi >=0.54, nguoi khac <=0.29 -> 0.40 tach sach, du bien an toan.
-const FACE_SIM_THRESHOLD = 0.40;
+// Nguong do GIONG cosine cua ArcFace (cang LON cang giong). Tu 0..1. Chinh duoc qua env FACE_SIM_THRESHOLD.
+// Can bang: du tach nguoi khac ma van bat duoc nhieu goc mat cua dung nguoi.
+const FACE_SIM_THRESHOLD = +process.env.FACE_SIM_THRESHOLD || 0.40;
+// Do phan giai anh tai ve khi quet khuon mat (cang lon cang bat duoc mat nho trong anh tap the).
+const INDEX_IMG_SIZE = +process.env.INDEX_IMG_SIZE || 2048;
 
 // ===== Danh chi muc khuon mat chay nen (1 job/su kien) =====
 const indexing = new Set(); // id su kien dang chay
@@ -35,7 +38,7 @@ async function startIndexing(eventId) {
 
     // Tai anh song song (prefetch) de chong thoi gian mang len luc CPU xu ly -> nhanh hon
     const PREFETCH = 5;
-    const dl = (p) => fetch(drive.thumbUrl(p.drive_file_id, 1024), { redirect: 'follow' })
+    const dl = (p) => fetch(drive.thumbUrl(p.drive_file_id, INDEX_IMG_SIZE), { redirect: 'follow' })
       .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error('tai anh loi ' + r.status))))
       .then((a) => Buffer.from(a));
     const inflight = new Array(photos.length);
@@ -69,16 +72,24 @@ async function startIndexing(eventId) {
   }
 }
 
-// ===== Upload thumbnail su kien (luu o data/uploads) =====
-const thumbStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const ext = (path.extname(file.originalname) || '.jpg').toLowerCase();
-    cb(null, 'thumb_' + crypto.randomBytes(8).toString('hex') + ext);
-  },
-});
-const uploadThumb = multer({ storage: thumbStorage, limits: { fileSize: 8 * 1024 * 1024 } });
-const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
+// ===== Upload thumbnail su kien =====
+// Nhan vao bo nho roi NEN bang sharp -> file JPEG nho (~vai chuc KB) ghi rat nhanh.
+// Tranh viec multer ghi truc tiep file goc lon xuong volume/GCS mount cham -> request treo/loi 500.
+const uploadThumb = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
+const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 12 * 1024 * 1024 } });
+
+// Nen + ghi thumbnail (atomic: ghi .part roi rename). Tra ve ten file, nem loi neu anh hong.
+async function saveThumbnail(file) {
+  const name = 'thumb_' + crypto.randomBytes(8).toString('hex') + '.jpg';
+  const dest = path.join(UPLOAD_DIR, name);
+  const tmp = dest + '.part';
+  const out = await sharp(file.buffer).rotate()
+    .resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 82 }).toBuffer();
+  fs.writeFileSync(tmp, out);
+  fs.renameSync(tmp, dest);
+  return name;
+}
 
 // ===== Tien ich =====
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -101,7 +112,11 @@ function canEditEvent(user, ev) {
 }
 
 // Phien ban engine (de kiem tra ban deploy da cap nhat chua)
-router.get('/version', (req, res) => res.json({ engine: 'scrfd+arcface-mbf', build: '2026-06-15-scrfd', threshold: FACE_SIM_THRESHOLD }));
+router.get('/version', (req, res) => res.json({
+  engine: (process.env.ARC_MODEL || 'arcface_w600k_r50.onnx').replace('.onnx', ''),
+  build: '2026-06-15-r50-hires', threshold: FACE_SIM_THRESHOLD,
+  det_size: +process.env.DET_SIZE || 1024, index_img: INDEX_IMG_SIZE,
+}));
 
 // =====================================================================
 //  XAC THUC & DANG NHAP
@@ -230,21 +245,33 @@ router.get('/events/:id', requireAuth, (req, res) => {
   res.json(eventOut(ev));
 });
 
-router.post('/events', requireAuth, uploadThumb.single('thumbnail'), (req, res) => {
+router.post('/events', requireAuth, uploadThumb.single('thumbnail'), async (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.event_date) return res.status(400).json({ error: 'Can nhap Ten su kien va Ngay dien ra' });
+
+  // Chong tao trung: cung nguoi tao + ten + ngay vua tao trong 30s -> tra ve su kien da co (vd bam Luu nhieu lan).
+  const dup = db.prepare(`SELECT id FROM events WHERE created_by=? AND name=? AND event_date=?
+    AND created_at >= datetime('now','-30 seconds') ORDER BY id DESC LIMIT 1`)
+    .get(req.user.id, b.name.trim(), b.event_date);
+  if (dup) return res.json({ id: dup.id, deduped: true });
+
+  let thumbName = '';
+  if (req.file) {
+    try { thumbName = await saveThumbnail(req.file); }
+    catch (e) { return res.status(400).json({ error: 'Anh bia khong hop le: ' + e.message }); }
+  }
   const pwHash = b.access_password ? bcrypt.hashSync(b.access_password, 10) : '';
   const folderId = drive.parseFolderId(b.drive_link || '');
   const info = db.prepare(`INSERT INTO events
     (name, event_date, description, access_password_hash, thumbnail, drive_link, drive_folder_id, expires_at, created_by)
     VALUES (?,?,?,?,?,?,?,?,?)`).run(
     b.name.trim(), b.event_date, (b.description || '').trim(), pwHash,
-    req.file ? req.file.filename : '', (b.drive_link || '').trim(), folderId,
+    thumbName, (b.drive_link || '').trim(), folderId,
     (b.expires_at || '').trim(), req.user.id);
   res.json({ id: info.lastInsertRowid });
 });
 
-router.put('/events/:id', requireAuth, uploadThumb.single('thumbnail'), (req, res) => {
+router.put('/events/:id', requireAuth, uploadThumb.single('thumbnail'), async (req, res) => {
   const ev = db.prepare('SELECT * FROM events WHERE id = ?').get(req.params.id);
   if (!ev) return res.status(404).json({ error: 'Khong tim thay su kien' });
   if (!canEditEvent(req.user, ev)) return res.status(403).json({ error: 'Khong co quyen' });
@@ -259,10 +286,18 @@ router.put('/events/:id', requireAuth, uploadThumb.single('thumbnail'), (req, re
   let folderId = ev.drive_folder_id, driveLink = ev.drive_link;
   if (b.drive_link !== undefined) { driveLink = (b.drive_link || '').trim(); folderId = drive.parseFolderId(driveLink); }
 
+  // Anh bia moi (neu co) -> nen + ghi, xoa anh cu de khong bo file rac
+  let thumbName = ev.thumbnail;
+  if (req.file) {
+    try { thumbName = await saveThumbnail(req.file); }
+    catch (e) { return res.status(400).json({ error: 'Anh bia khong hop le: ' + e.message }); }
+    if (ev.thumbnail) fs.unlink(path.join(UPLOAD_DIR, ev.thumbnail), () => {});
+  }
+
   db.prepare(`UPDATE events SET name=?, event_date=?, description=?, access_password_hash=?,
     thumbnail=?, drive_link=?, drive_folder_id=?, expires_at=? WHERE id=?`).run(
     (b.name || ev.name).trim(), b.event_date || ev.event_date, (b.description ?? ev.description).trim(),
-    pwHash, req.file ? req.file.filename : ev.thumbnail, driveLink, folderId,
+    pwHash, thumbName, driveLink, folderId,
     (b.expires_at ?? ev.expires_at).trim(), ev.id);
   res.json({ ok: true });
 });

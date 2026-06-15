@@ -23,6 +23,15 @@ app.use('/api', require('./routes/api'));
 app.use('/uploads', express.static(UPLOAD_DIR));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Bo bat loi chung: tra ve JSON ro rang (vd file qua lon) thay vi trang HTML loi 500.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  if (err && err.code === 'LIMIT_FILE_SIZE')
+    return res.status(413).json({ error: 'File anh qua lon (toi da 15MB).' });
+  console.error('Loi may chu:', err && err.message);
+  res.status(err.status || 500).json({ error: (err && err.message) || 'Loi may chu' });
+});
+
 app.listen(PORT, () => {
   console.log(`✔ MISA - Tim anh AI dang chay tai: http://localhost:${PORT}`);
 });
