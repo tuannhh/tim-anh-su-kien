@@ -18,7 +18,8 @@ COPY . .
 # Cau hinh litestream + script khoi dong
 COPY litestream.yml /etc/litestream.yml
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Xoa ky tu CR (\r) phong khi file bi luu kieu Windows (CRLF) -> tranh loi "exec: /entrypoint.sh: not found"
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 ENV NODE_ENV=production
 ENV DATA_DIR=/tmp/data

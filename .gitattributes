@@ -1,0 +1,3 @@
+# Ep file shell script luon dung xuong dong kieu Unix (LF), tranh loi shebang tren Linux/Docker
+*.sh text eol=lf
+entrypoint.sh text eol=lf
