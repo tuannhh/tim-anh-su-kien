@@ -1,0 +1,7 @@
+# Sao luu lien tuc DB SQLite -> Google Cloud Storage (xac thuc bang service account cua Cloud Run)
+dbs:
+  - path: /tmp/data/timanh.db
+    replicas:
+      - type: gcs
+        bucket: ${LITESTREAM_BUCKET}
+        path: db

@@ -1,26 +1,28 @@
-# Dockerfile cho MISA - Tim anh AI (dung cho Google Cloud Run, AWS, hoac server MISA co Docker)
-# Dung Debian (glibc) - KHONG dung Alpine vi onnxruntime-node/sharp can glibc.
+# Dockerfile cho MISA - Tim anh AI (Google Cloud Run / AWS / server MISA co Docker)
+# Debian (glibc) - KHONG dung Alpine vi onnxruntime-node/sharp can glibc.
 FROM node:20-bookworm-slim
 
-# Cong cu bien dich cho thu vien native (better-sqlite3 build tu nguon neu thieu prebuilt)
-RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+# Cong cu bien dich native (better-sqlite3) + curl de tai litestream
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ curl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Litestream: sao luu lien tuc SQLite -> Google Cloud Storage (giu du lieu lau dai tren Cloud Run)
+RUN curl -fsSL https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz \
+  | tar -xz -C /usr/local/bin litestream
 
-# Cai thu vien (tan dung cache layer)
+WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
-
-# Chep ma nguon
 COPY . .
 
-ENV NODE_ENV=production
-# Cloud Run: o dia tam ghi duoc o /tmp. Model AI + DB se nam o day (tai lai khi khoi dong nguoi - chap nhan cho ban chay thu).
-# Khi chay tren server thuong/AWS co o dia ben, dat DATA_DIR tro vao o dia do de luu lau dai.
-ENV DATA_DIR=/tmp/data
+# Cau hinh litestream + script khoi dong
+COPY litestream.yml /etc/litestream.yml
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-# Cloud Run tu cap bien PORT (mac dinh 8080); server.js da doc process.env.PORT.
+ENV NODE_ENV=production
+ENV DATA_DIR=/tmp/data
 EXPOSE 8080
 
-CMD ["node", "server.js"]
+# entrypoint: khoi phuc DB tu GCS (neu co LITESTREAM_BUCKET) roi chay app + sao luu lien tuc.
+CMD ["/entrypoint.sh"]
