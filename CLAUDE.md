@@ -4,7 +4,7 @@ Web giúp khách tìm & tải ảnh sự kiện trên Google Drive, **tìm ảnh
 
 ## Tổng quan kỹ thuật
 - **Stack:** Node.js + Express + better-sqlite3, frontend thuần HTML/JS/CSS (SPA hash routing) trong `public/`. Cùng khuôn mẫu với dự án `misa-event-checkin`.
-- **AI khuôn mặt:** lai 2 bước trong `face.js`: (1) **face-api.js** (WASM, `@tensorflow/tfjs` + `tfjs-backend-wasm`) để TÌM mặt + 68 điểm mốc; (2) **ArcFace/InsightFace** (`onnxruntime-node`, model `buffalo_l w600k_r50`) để lấy vector danh tính 512 chiều. ArcFace phân biệt ĐÚNG DANH TÍNH (không nhầm theo hình dạng) → chính xác cao. Tất cả chạy trong Node, không cần dịch vụ Python. face-api models nhỏ nằm trong `models/` (commit); model ArcFace 174MB tự tải khi chạy lần đầu (gitignore `models/*.onnx`).
+- **AI khuôn mặt (toàn bộ ONNX native qua `onnxruntime-node`):** trong `face.js`: (1) **SCRFD** (`scrfd_10g.onnx`, buffalo_l detection) DÒ mặt + 5 điểm mốc; (2) căn chỉnh 5 điểm → warp 112×112; (3) **ArcFace MobileFaceNet** (`arcface_mbf.onnx`, buffalo_s, mặc định) → vector 512-d. KHÔNG còn dùng face-api/tfjs (đã gỡ — WASM quá chậm trên CPU yếu). Tốc độ ~0.16s/ảnh local (~6x nhanh hơn bản WASM cũ). Tất cả model `.onnx` gitignore + TỰ TẢI lần đầu (map URL `MODELS` trong face.js: scrfd_10g, arcface_mbf, arcface_w600k_r50).
 - **Ảnh:** đọc trực tiếp từ Google Drive public qua Drive API key (Super Admin nhập 1 lần ở tab Cấu hình). KHÔNG lưu bản sao ảnh; chỉ lưu descriptor khuôn mặt ẩn danh (vector 128 số) + drive_file_id.
 - **Chạy local:** `npm start` → http://localhost:3000 (hoặc nháy đúp `KHOI-DONG.bat`). DB tự tạo tại `data/timanh.db`.
   - ⚠️ Trên máy dev hiện tại port 3000 bị app khác chiếm → dùng `PORT=3100 node server.js`. Preview qua `~/.claude/launch.json` (config "misa-tim-anh").
