@@ -2,6 +2,10 @@
 # Dung Debian (glibc) - KHONG dung Alpine vi onnxruntime-node/sharp can glibc.
 FROM node:20-bookworm-slim
 
+# Cong cu bien dich cho thu vien native (better-sqlite3 build tu nguon neu thieu prebuilt)
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Cai thu vien (tan dung cache layer)
