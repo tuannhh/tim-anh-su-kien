@@ -20,6 +20,8 @@ const router = express.Router();
 const FACE_SIM_THRESHOLD = +process.env.FACE_SIM_THRESHOLD || 0.40;
 // Do phan giai anh tai ve khi quet khuon mat (cang lon cang bat duoc mat nho trong anh tap the).
 const INDEX_IMG_SIZE = +process.env.INDEX_IMG_SIZE || 2048;
+// Thoi gian toi da cho 1 lan tai anh tu Drive (ms). Tranh treo ca tien trinh quet khi 1 anh bi ket mang.
+const FETCH_TIMEOUT = +process.env.FETCH_TIMEOUT || 30000;
 
 // ===== Danh chi muc khuon mat chay nen (1 job/su kien) =====
 const indexing = new Set(); // id su kien dang chay
@@ -38,9 +40,22 @@ async function startIndexing(eventId) {
 
     // Tai anh song song (prefetch) de chong thoi gian mang len luc CPU xu ly -> nhanh hon
     const PREFETCH = 5;
-    const dl = (p) => fetch(drive.thumbUrl(p.drive_file_id, INDEX_IMG_SIZE), { redirect: 'follow' })
-      .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error('tai anh loi ' + r.status))))
-      .then((a) => Buffer.from(a));
+    // Tai 1 anh: co gioi han thoi gian (AbortController) + thu lai 1 lan. Het thi nem loi -> bo qua anh, quet tiep.
+    const dl = async (p) => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT);
+        try {
+          const r = await fetch(drive.thumbUrl(p.drive_file_id, INDEX_IMG_SIZE), { redirect: 'follow', signal: ctrl.signal });
+          if (!r.ok) throw new Error('tai anh loi ' + r.status);
+          return Buffer.from(await r.arrayBuffer());
+        } catch (e) {
+          if (attempt === 1) throw e;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+    };
     const inflight = new Array(photos.length);
     const startFetch = (i) => { if (i < photos.length) inflight[i] = dl(photos[i]).catch(() => null); };
     for (let i = 0; i < Math.min(PREFETCH, photos.length); i++) startFetch(i);

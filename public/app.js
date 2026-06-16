@@ -330,7 +330,8 @@ function openLightbox(list, startIdx) {
 /* ---------- Tìm theo khuôn mặt (Giai đoạn 5) ---------- */
 function openFaceSearch() {
   let blob = null;
-  const file = h('input', { type: 'file', accept: 'image/*', capture: 'user', style: 'display:none' });
+  // KHONG dat 'capture' de mobile cho chon tu thu vien/file HOAC camera (truoc day ep mo camera selfie).
+  const file = h('input', { type: 'file', accept: 'image/*', style: 'display:none' });
   const preview = h('img', { class: 'fs-preview', alt: '' });
   const hint = h('div', { class: 'fs-hint' },
     h('div', { class: 'big' }, '📷'),
@@ -373,7 +374,7 @@ function openFaceSearch() {
 
   openModal(h('div', { class: 'modal' },
     h('h3', {}, '🤖 Tìm ảnh của tôi'),
-    h('p', { class: 'muted' }, 'Chọn, chụp hoặc dán 1 ảnh chân dung rõ mặt, chính diện. AI sẽ lọc ra các ảnh có khuôn mặt của bạn.'),
+    h('p', { class: 'muted' }, 'Chọn ảnh từ thư viện, chụp ảnh hoặc dán 1 ảnh chân dung rõ mặt, chính diện. AI sẽ lọc ra các ảnh có khuôn mặt đó.'),
     zone, file,
     h('div', { class: 'hint' }, '🔒 Ảnh của bạn chỉ dùng để tìm ngay lúc này và KHÔNG được lưu lại.'),
     err,
