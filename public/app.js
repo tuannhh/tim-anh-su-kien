@@ -620,9 +620,14 @@ async function syncEvent(id, thenDashboard) {
 /* ---------- Tab: Thành viên (Super Admin) ---------- */
 async function tabUsers(body) {
   body.innerHTML = '';
+  const fileInput = h('input', { type: 'file', accept: '.xlsx', style: 'display:none', onchange: () => importUsers(fileInput) });
   body.append(h('div', { class: 'page-head' },
     h('h2', {}, 'Quản lý thành viên'),
-    h('button', { class: 'btn', onclick: () => userForm() }, '+ Tạo Admin mới')));
+    h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' },
+      h('button', { class: 'btn secondary', onclick: downloadUserTemplate }, '⬇️ Tải file mẫu'),
+      h('button', { class: 'btn secondary', onclick: () => fileInput.click() }, '📥 Nhập từ Excel'),
+      fileInput,
+      h('button', { class: 'btn', onclick: () => userForm() }, '+ Tạo Admin mới'))));
   body.append(h('div', { class: 'spinner' }));
   let list; try { list = await api('GET', '/users'); } catch (e) { body.lastChild.remove(); body.append(h('div', { class: 'empty' }, e.message)); return; }
   body.lastChild.remove();
@@ -672,13 +677,45 @@ function userForm(u) {
 }
 
 function resetPw(u) {
-  const np = h('input', { type: 'text', placeholder: 'Mật khẩu mới (tối thiểu 6 ký tự)' });
-  const err = h('div', { class: 'error-msg' });
-  async function go() { err.textContent = ''; try { await api('POST', `/users/${u.id}/reset-password`, { new_password: np.value }); closeModal(); toast('Đã reset mật khẩu. Admin sẽ phải đổi khi đăng nhập.'); } catch (e) { err.textContent = e.message; } }
+  async function go() {
+    try { await api('POST', `/users/${u.id}/reset-password`); closeModal(); toast('Đã reset về mật khẩu mặc định. Admin sẽ phải đổi khi đăng nhập.', 4500); viewDashboard(); }
+    catch (e) { toast(e.message); }
+  }
   openModal(h('div', { class: 'modal' },
     h('h3', {}, 'Reset mật khẩu: ' + u.display_name),
-    h('label', {}, 'Mật khẩu mới'), np, err,
-    h('div', { class: 'modal-actions' }, h('button', { class: 'btn secondary', onclick: closeModal }, 'Hủy'), h('button', { class: 'btn', onclick: go }, 'Reset'))));
+    h('p', { class: 'muted', style: 'margin-top:6px' }, 'Mật khẩu sẽ được đặt lại thành mật khẩu mặc định bên dưới. Admin đăng nhập bằng mật khẩu này rồi bắt buộc phải đổi lại.'),
+    h('div', { style: 'font-size:18px;font-weight:700;text-align:center;background:#f1f5f9;border-radius:8px;padding:10px;margin:10px 0;letter-spacing:1px' }, '12345678@Abc'),
+    h('div', { class: 'modal-actions' },
+      h('button', { class: 'btn secondary', onclick: closeModal }, 'Hủy'),
+      h('button', { class: 'btn', onclick: go }, 'Reset về mặc định'))));
+}
+
+// Tai file Excel mau (dang nhap kem cookie -> dung the <a> tai truc tiep)
+function downloadUserTemplate() {
+  const a = document.createElement('a');
+  a.href = '/api/users/template'; a.download = 'mau-danh-sach-admin.xlsx';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+// Nhap danh sach Admin tu file Excel da chon
+async function importUsers(input) {
+  const f = input.files[0]; input.value = '';
+  if (!f) return;
+  const fd = new FormData(); fd.append('file', f);
+  toast('Đang nhập danh sách...', 6000);
+  try {
+    const r = await api('POST', '/users/import', fd, true);
+    viewDashboard();
+    if (r.errors && r.errors.length) {
+      openModal(h('div', { class: 'modal' },
+        h('h3', {}, `Kết quả: tạo ${r.created} admin, bỏ qua ${r.errors.length} dòng`),
+        h('div', { style: 'max-height:300px;overflow:auto;margin-top:8px' },
+          r.errors.map((e) => h('div', { class: 'muted', style: 'font-size:13px;padding:2px 0' }, '• ' + e))),
+        h('div', { class: 'modal-actions' }, h('button', { class: 'btn', onclick: closeModal }, 'Đóng'))));
+    } else {
+      toast(`Đã tạo ${r.created} admin từ file.`, 3500);
+    }
+  } catch (e) { toast('Nhập lỗi: ' + e.message, 4500); }
 }
 
 function delUser(u) {
