@@ -7,6 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const archiver = require('archiver');
 const sharp = require('sharp');
+const ExcelJS = require('exceljs');
 const { Readable } = require('stream');
 const db = require('../db');
 const { UPLOAD_DIR } = require('../config');
@@ -14,6 +15,9 @@ const drive = require('../drive');
 const face = require('../face');
 
 const router = express.Router();
+
+// Mat khau mac dinh khi Super Admin reset cho Admin. Admin dang nhap bang mat khau nay roi BAT BUOC doi lai.
+const DEFAULT_RESET_PASSWORD = '12345678@Abc';
 
 // Nguong do GIONG cosine cua ArcFace (cang LON cang giong). Tu 0..1. Chinh duoc qua env FACE_SIM_THRESHOLD.
 // Can bang: du tach nguoi khac ma van bat duoc nhieu goc mat cua dung nguoi.
@@ -198,13 +202,13 @@ router.put('/users/:id', requireAuth, requireSuper, (req, res) => {
 });
 
 router.post('/users/:id/reset-password', requireAuth, requireSuper, (req, res) => {
-  const { new_password } = req.body || {};
-  if (!new_password || new_password.length < 6) return res.status(400).json({ error: 'Mat khau moi can it nhat 6 ky tu' });
+  // Reset ve mat khau mac dinh co dinh. Admin se phai doi lai khi dang nhap (must_change_password=1).
   const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!u) return res.status(404).json({ error: 'Khong tim thay thanh vien' });
   if (u.role === 'super_admin') return res.status(400).json({ error: 'Khong reset duoc tai khoan Super Admin o day' });
-  db.prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?').run(bcrypt.hashSync(new_password, 10), u.id);
-  res.json({ ok: true });
+  db.prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?')
+    .run(bcrypt.hashSync(DEFAULT_RESET_PASSWORD, 10), u.id);
+  res.json({ ok: true, password: DEFAULT_RESET_PASSWORD });
 });
 
 router.delete('/users/:id', requireAuth, requireSuper, (req, res) => {
@@ -213,6 +217,64 @@ router.delete('/users/:id', requireAuth, requireSuper, (req, res) => {
   if (u.role === 'super_admin') return res.status(400).json({ error: 'Khong the xoa Super Admin' });
   db.prepare('DELETE FROM users WHERE id = ?').run(u.id);
   res.json({ ok: true });
+});
+
+// Tai file Excel MAU de nhap danh sach Admin (cot: Ten hien thi, Email, Mat khau)
+router.get('/users/template', requireAuth, requireSuper, async (req, res) => {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Danh sach Admin');
+  ws.columns = [
+    { header: 'Tên hiển thị', key: 'name', width: 28 },
+    { header: 'Email', key: 'email', width: 34 },
+    { header: 'Mật khẩu', key: 'password', width: 22 },
+  ];
+  ws.getRow(1).font = { bold: true };
+  ws.addRow({ name: 'Nguyễn Văn A', email: 'vana@misa.com.vn', password: 'MatKhau@123' });
+  ws.addRow({ name: 'Trần Thị B', email: 'thib@misa.com.vn', password: 'MatKhau@456' });
+  const buf = await wb.xlsx.writeBuffer();
+  res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.set('Content-Disposition', 'attachment; filename="mau-danh-sach-admin.xlsx"');
+  res.send(Buffer.from(buf));
+});
+
+// Nhap danh sach Admin tu file Excel. Tao moi voi must_change_password=1 (admin doi MK lan dau).
+router.post('/users/import', requireAuth, requireSuper, uploadMem.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Chua chon file.' });
+  let ws;
+  try {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(req.file.buffer);
+    ws = wb.worksheets[0];
+    if (!ws) throw new Error('file khong co sheet');
+  } catch (e) {
+    return res.status(400).json({ error: 'Khong doc duoc file Excel (.xlsx): ' + e.message });
+  }
+  // Lay text 1 o (xu ly ca truong hop o la object: hyperlink/rich text/cong thuc)
+  const cell = (row, c) => {
+    const v = row.getCell(c).value;
+    if (v == null) return '';
+    if (typeof v === 'object') return String(v.text || v.result || v.hyperlink || '').trim();
+    return String(v).trim();
+  };
+  const insert = db.prepare(`INSERT INTO users (display_name, email, password_hash, role, must_change_password)
+                             VALUES (?, ?, ?, 'admin', 1)`);
+  const existsEmail = db.prepare('SELECT id FROM users WHERE email = ?');
+
+  let created = 0; const errors = []; const seen = new Set();
+  for (let r = 2; r <= ws.rowCount; r++) {
+    const row = ws.getRow(r);
+    const name = cell(row, 1), email = cell(row, 2).toLowerCase(), password = cell(row, 3);
+    if (!name && !email && !password) continue; // dong trong
+    if (!name || !email || !password) { errors.push(`Dòng ${r}: thiếu Tên / Email / Mật khẩu`); continue; }
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { errors.push(`Dòng ${r}: email không hợp lệ (${email})`); continue; }
+    if (password.length < 6) { errors.push(`Dòng ${r}: mật khẩu dưới 6 ký tự (${email})`); continue; }
+    if (seen.has(email)) { errors.push(`Dòng ${r}: email trùng trong file (${email})`); continue; }
+    if (existsEmail.get(email)) { errors.push(`Dòng ${r}: email đã tồn tại trong hệ thống (${email})`); continue; }
+    seen.add(email);
+    try { insert.run(name, email, bcrypt.hashSync(password, 10)); created++; }
+    catch (e) { errors.push(`Dòng ${r}: lỗi khi tạo (${email})`); }
+  }
+  res.json({ created, errors });
 });
 
 // =====================================================================
