@@ -42,8 +42,6 @@ async function startIndexing(eventId) {
     const total = db.prepare('SELECT COUNT(*) n FROM event_photos WHERE event_id=?').get(eventId).n;
     const photos = db.prepare("SELECT id, drive_file_id FROM event_photos WHERE event_id=? AND face_status='pending' ORDER BY sort, id").all(eventId);
 
-    // Tai anh song song (prefetch) de chong thoi gian mang len luc CPU xu ly -> nhanh hon
-    const PREFETCH = 5;
     // Tai 1 anh: co gioi han thoi gian (AbortController) + thu lai 1 lan. Het thi nem loi -> bo qua anh, quet tiep.
     const dl = async (p) => {
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -60,15 +58,15 @@ async function startIndexing(eventId) {
         }
       }
     };
-    const inflight = new Array(photos.length);
-    const startFetch = (i) => { if (i < photos.length) inflight[i] = dl(photos[i]).catch(() => null); };
-    for (let i = 0; i < Math.min(PREFETCH, photos.length); i++) startFetch(i);
 
+    // Quet SONG SONG nhieu anh cung luc (worker pool) -> nhanh hon nhieu khi co hang nghin anh.
+    // Moi "worker" lan luot lay anh tiep theo: tai -> nhan dien -> luu. Chinh so luong qua env INDEX_CONCURRENCY.
+    const CONCURRENCY = Math.max(1, +process.env.INDEX_CONCURRENCY || 4);
     let done = db.prepare("SELECT COUNT(*) n FROM event_photos WHERE event_id=? AND face_status IN ('done','nofocus','error')").get(eventId).n;
-    for (let i = 0; i < photos.length; i++) {
-      const p = photos[i];
-      const buf = await inflight[i]; inflight[i] = null;
-      startFetch(i + PREFETCH); // giu hang doi tai luon day
+    let next = 0;
+    const processOne = async (p) => {
+      let buf = null;
+      try { buf = await dl(p); } catch { buf = null; }
       try {
         if (!buf) throw new Error('khong tai duoc anh');
         const descs = await face.getDescriptors(buf);
@@ -81,9 +79,15 @@ async function startIndexing(eventId) {
         setDone.run('error', p.id);
       }
       done++;
-      db.prepare("UPDATE events SET faces_indexed=?, index_message=? WHERE id=?").run(done, `Đã quét ${done}/${total} ảnh`, eventId);
-    }
-    db.prepare("UPDATE events SET index_status='done', index_message=? WHERE id=?").run(`Hoàn tất: đã quét ${total} ảnh.`, eventId);
+      // Ghi tien trinh thua (moi 3 anh hoac anh cuoi) de do dồn ghi DB khi chay song song
+      if (done % 3 === 0 || done >= total)
+        db.prepare("UPDATE events SET faces_indexed=?, index_message=? WHERE id=?").run(done, `Đã quét ${done}/${total} ảnh`, eventId);
+    };
+    const worker = async () => { while (next < photos.length) { const p = photos[next++]; await processOne(p); } };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, photos.length) }, worker));
+
+    db.prepare("UPDATE events SET index_status='done', faces_indexed=?, index_message=? WHERE id=?")
+      .run(done, `Hoàn tất: đã quét ${total} ảnh.`, eventId);
   } catch (e) {
     db.prepare("UPDATE events SET index_status='error', index_message=? WHERE id=?").run('Lỗi quét khuôn mặt: ' + e.message, eventId);
   } finally {

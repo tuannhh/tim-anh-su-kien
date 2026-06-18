@@ -1,9 +1,10 @@
 // May chu chinh - chay bang lenh: npm start
 const express = require('express');
 const session = require('express-session');
+const SqliteStore = require('better-sqlite3-session-store')(session);
 const path = require('path');
 const { UPLOAD_DIR } = require('./config');
-require('./db');
+const db = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,6 +14,8 @@ if (IS_CLOUD) app.set('trust proxy', 1); // chay sau proxy HTTPS cua nha cung ca
 
 app.use(express.json({ limit: '4mb' }));
 app.use(session({
+  // Luu phien vao SQLite (cung DB, duoc litestream sao luu) -> KHONG bi mat dang nhap khi deploy/khoi dong lai.
+  store: new SqliteStore({ client: db, expired: { clear: true, intervalMs: 24 * 60 * 60 * 1000 } }),
   secret: process.env.SESSION_SECRET || 'misa-tim-anh-ai-secret-2026',
   resave: false,
   saveUninitialized: false,
