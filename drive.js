@@ -39,26 +39,43 @@ async function checkFolder(folderId, apiKey) {
   }
 }
 
-// Liet ke tat ca anh trong thu muc (co phan trang). Tra ve [{id, name, mimeType}]
+// Liet ke TAT CA anh trong thu muc + MOI thu muc con (de quy). Chi lay file anh, bo qua video/text/...
+// Tra ve [{id, name, mimeType}]
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
 async function listImages(folderId, apiKey) {
-  const files = [];
-  let pageToken = '';
-  do {
-    const q = encodeURIComponent(`'${folderId}' in parents and mimeType contains 'image/' and trashed = false`);
-    const url = `https://www.googleapis.com/drive/v3/files` +
-      `?q=${q}&fields=nextPageToken,files(id,name,mimeType)` +
-      `&pageSize=1000&orderBy=name_natural&supportsAllDrives=true&includeItemsFromAllDrives=true` +
-      (pageToken ? `&pageToken=${pageToken}` : '') + `&key=${apiKey}`;
-    const res = await fetch(url);
-    if (!res.ok) {
-      const t = await res.text().catch(() => '');
-      throw new Error(`Drive list loi ${res.status}: ${t.slice(0, 200)}`);
-    }
-    const j = await res.json();
-    for (const f of j.files || []) files.push(f);
-    pageToken = j.nextPageToken || '';
-  } while (pageToken);
-  return files;
+  const images = [];
+  const visited = new Set(); // tranh lap vo han neu thu muc tham chieu vong
+
+  async function walk(fid) {
+    if (visited.has(fid)) return;
+    visited.add(fid);
+    const subFolders = [];
+    let pageToken = '';
+    do {
+      // Liet ke MOI muc (file + thu muc con) khong nam trong thung rac
+      const q = encodeURIComponent(`'${fid}' in parents and trashed = false`);
+      const url = `https://www.googleapis.com/drive/v3/files` +
+        `?q=${q}&fields=nextPageToken,files(id,name,mimeType)` +
+        `&pageSize=1000&orderBy=folder,name_natural&supportsAllDrives=true&includeItemsFromAllDrives=true` +
+        (pageToken ? `&pageToken=${pageToken}` : '') + `&key=${apiKey}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        const t = await res.text().catch(() => '');
+        throw new Error(`Drive list loi ${res.status}: ${t.slice(0, 200)}`);
+      }
+      const j = await res.json();
+      for (const f of j.files || []) {
+        if (f.mimeType === FOLDER_MIME) subFolders.push(f.id);
+        else if ((f.mimeType || '').startsWith('image/')) images.push(f); // chi lay anh, bo qua loai khac
+      }
+      pageToken = j.nextPageToken || '';
+    } while (pageToken);
+    // De quy vao tung thu muc con
+    for (const sf of subFolders) await walk(sf);
+  }
+
+  await walk(folderId);
+  return images;
 }
 
 // Cac URL anh cong khai (khong can API key) - dung de hien thi & tai

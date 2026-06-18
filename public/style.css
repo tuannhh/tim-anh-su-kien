@@ -100,9 +100,11 @@ code { background: #e0e7ff; padding: 1px 6px; border-radius: 5px; font-size: 12.
 .lb-top .ic:hover { background: rgba(255,255,255,.25); }
 .lb-stage { flex: 1; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; touch-action: none; }
 .lb-stage img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; transition: transform .08s; will-change: transform; }
-.lb-nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(255,255,255,.13); color: #fff; border: none; width: 48px; height: 48px; border-radius: 50%; font-size: 24px; display: flex; align-items: center; justify-content: center; }
-.lb-nav:hover { background: rgba(255,255,255,.28); }
+.lb-nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(8,12,22,.55); color: #fff; border: 1.5px solid rgba(255,255,255,.55); width: 48px; height: 48px; border-radius: 50%; font-size: 24px; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 12px rgba(0,0,0,.45); backdrop-filter: blur(2px); }
+.lb-nav:hover { background: rgba(8,12,22,.82); }
 .lb-nav.prev { left: 14px; } .lb-nav.next { right: 14px; }
+/* Tren mobile/cam ung: an mui ten (nguoi dung vuot de chuyen anh) */
+@media (hover: none) and (pointer: coarse) { .lb-nav { display: none; } }
 .lb-zoom { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; }
 .lb-zoom button { background: rgba(255,255,255,.15); color: #fff; border: none; width: 42px; height: 42px; border-radius: 50%; font-size: 20px; }
 .lb-zoom button:hover { background: rgba(255,255,255,.3); }
