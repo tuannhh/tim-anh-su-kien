@@ -20,6 +20,10 @@ function h(tag, attrs, ...kids) {
 const $ = (s, r = document) => r.querySelector(s);
 const app = $('#app');
 
+// Nhan biet thiet bi di dong / cam ung (de tai anh le thay vi .zip, vi mobile thuong khong co app giai nen)
+const isMobile = () => /Android|iPhone|iPad|iPod|Mobile|Silk/i.test(navigator.userAgent)
+  || (window.matchMedia && window.matchMedia('(hover: none) and (pointer: coarse)').matches);
+
 // ---------- Toast ----------
 let toastT;
 function toast(msg, ms = 2600) {
@@ -201,7 +205,7 @@ function renderGallery(c) {
     G.selectMode ? '✖ Thoát chọn' : '☑ Chọn ảnh');
   bar.append(selBtn);
   if (G.selectMode) bar.append(h('button', { class: 'btn secondary', onclick: () => downloadSelected() }, `⬇ Tải ảnh đã chọn (${G.selected.size})`));
-  bar.append(h('button', { class: 'btn green', onclick: () => downloadAll() }, '⬇ Tải tất cả (.zip)'));
+  bar.append(h('button', { class: 'btn green', onclick: () => downloadAll() }, isMobile() ? '⬇ Tải tất cả ảnh' : '⬇ Tải tất cả (.zip)'));
   c.append(bar);
 
   if (G.filtered) {
@@ -245,13 +249,43 @@ function dl(url) { const a = document.createElement('a'); a.href = url; a.downlo
 function downloadSelected() {
   const ids = [...G.selected];
   if (!ids.length) return toast('Bạn chưa chọn ảnh nào.');
+  if (isMobile()) return mobileDownload(ids);
   if (ids.length > 10) return zipDownload(ids);
   ids.forEach((id, i) => setTimeout(() => dl(`/api/public/photo/${id}/download`), i * 350));
   toast(`Đang tải ${ids.length} ảnh...`);
 }
 function downloadAll() {
   const list = G.filtered || G.photos;
-  zipDownload(list.map(p => p.id), true);
+  const ids = list.map(p => p.id);
+  if (isMobile()) return mobileDownload(ids);
+  zipDownload(ids, true);
+}
+
+// Tai tren mobile: tai TUNG file anh rieng le (khong .zip, vi dien thoai thuong khong co app giai nen).
+// Hien thong bao truoc vi trinh duyet co the hoi "cho phep tai nhieu tep".
+function mobileDownload(ids) {
+  if (!ids.length) return;
+  const start = () => {
+    closeModal();
+    let i = 0;
+    const next = () => {
+      if (i >= ids.length) { toast(`Đã tải xong ${ids.length} ảnh về máy.`, 3500); return; }
+      dl(`/api/public/photo/${ids[i]}/download`);
+      i++;
+      toast(`Đang tải ảnh ${i}/${ids.length}... (giữ máy mở)`, 2000);
+      setTimeout(next, 900);
+    };
+    next();
+  };
+  openModal(h('div', { class: 'modal' },
+    h('h3', {}, `Tải ${ids.length} ảnh về máy`),
+    h('p', { class: 'muted', style: 'margin-top:6px' },
+      'Trên điện thoại, ảnh sẽ được tải về dưới dạng từng file riêng (không nén .zip), để bạn xem được ngay mà không cần phần mềm giải nén.'),
+    h('div', { class: 'hint', style: 'margin-top:10px' },
+      '⚠️ Lần đầu, trình duyệt có thể hỏi "Tải xuống nhiều tệp?" — hãy chọn "Cho phép" / "Allow" để tải được tất cả ảnh. Ảnh tải lần lượt nên hãy giữ trang mở tới khi xong.'),
+    h('div', { class: 'modal-actions' },
+      h('button', { class: 'btn secondary', onclick: closeModal }, 'Hủy'),
+      h('button', { class: 'btn green', onclick: start }, `⬇ Bắt đầu tải ${ids.length} ảnh`))));
 }
 async function zipDownload(ids, all) {
   const wait = loadingModal(all ? 'Đang nén tất cả ảnh thành file .zip...' : `Đang nén ${ids.length} ảnh thành .zip...`,
@@ -281,10 +315,31 @@ function openLightbox(list, startIdx) {
   const stage = h('div', { class: 'lb-stage' }, img);
 
   function apply() { img.style.transform = `translate(${tx}px,${ty}px) scale(${scale})`; }
+  // Tai san truoc anh ke (truoc/sau) de vuot muot, khong bi trang
+  function preload(i) { const im = new Image(); im.src = `/api/public/photo/${list[(i + list.length) % list.length].id}/full`; }
   function show(i) {
-    idx = (i + list.length) % list.length; scale = 1; tx = 0; ty = 0; apply();
+    idx = (i + list.length) % list.length; scale = 1; tx = 0; ty = 0;
+    img.style.transition = ''; apply();
     img.src = `/api/public/photo/${list[idx].id}/full`;
     counter.textContent = `${idx + 1} / ${list.length}`;
+    preload(idx + 1); preload(idx - 1);
+  }
+  // Vuot chuyen anh: truot anh hien tai ra roi truot anh moi vao tu phia doi dien (muot)
+  function slideTo(targetIdx, outX) {
+    const ni = (targetIdx + list.length) % list.length;
+    img.style.transition = 'transform .16s ease-out';
+    img.style.transform = `translate(${outX}px,0) scale(1)`;
+    setTimeout(() => {
+      idx = ni; scale = 1; tx = 0; ty = 0;
+      counter.textContent = `${idx + 1} / ${list.length}`;
+      img.src = `/api/public/photo/${list[idx].id}/full`;
+      img.style.transition = 'none';
+      img.style.transform = `translate(${-outX}px,0) scale(1)`;
+      void img.offsetWidth; // ep trinh duyet ve lai -> transition sau day chac chan chay
+      img.style.transition = 'transform .18s ease-out';
+      img.style.transform = 'translate(0,0) scale(1)';
+      preload(idx + 1); preload(idx - 1);
+    }, 160);
   }
   function zoom(f) { scale = Math.min(Math.max(scale * f, 1), 5); if (scale === 1) { tx = 0; ty = 0; } apply(); }
 
@@ -310,14 +365,35 @@ function openLightbox(list, startIdx) {
   stage.addEventListener('mousedown', (e) => start(e.clientX, e.clientY));
   window.addEventListener('mousemove', (e) => move(e.clientX, e.clientY));
   window.addEventListener('mouseup', end);
-  // Cảm ứng: 1 ngón kéo, 2 ngón pinch
-  let pinchD = 0;
-  stage.addEventListener('touchstart', (e) => { if (e.touches.length === 1) start(e.touches[0].clientX, e.touches[0].clientY); else if (e.touches.length === 2) pinchD = dist(e); }, { passive: true });
+  // Cảm ứng: 2 ngón = pinch zoom; 1 ngón = kéo di chuyển (khi đã zoom) HOẶC vuốt trái/phải để chuyển ảnh (khi chưa zoom)
+  let pinchD = 0, swiping = false, swStartX = 0, swStartY = 0, swDx = 0;
+  stage.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2) { pinchD = dist(e); swiping = false; drag = null; }
+    else if (e.touches.length === 1) {
+      if (scale > 1) { start(e.touches[0].clientX, e.touches[0].clientY); swiping = false; }
+      else { swiping = true; swDx = 0; swStartX = e.touches[0].clientX; swStartY = e.touches[0].clientY; img.style.transition = 'none'; }
+    }
+  }, { passive: true });
   stage.addEventListener('touchmove', (e) => {
     if (e.touches.length === 2) { const d = dist(e); if (pinchD) zoom(d / pinchD); pinchD = d; e.preventDefault(); }
-    else if (e.touches.length === 1) move(e.touches[0].clientX, e.touches[0].clientY);
+    else if (e.touches.length === 1) {
+      if (scale > 1) { move(e.touches[0].clientX, e.touches[0].clientY); }
+      else if (swiping) {
+        const dx = e.touches[0].clientX - swStartX, dy = e.touches[0].clientY - swStartY;
+        if (Math.abs(dx) > Math.abs(dy)) { swDx = dx; img.style.transform = `translate(${dx}px,0) scale(1)`; e.preventDefault(); }
+      }
+    }
   }, { passive: false });
-  stage.addEventListener('touchend', () => { end(); pinchD = 0; });
+  stage.addEventListener('touchend', () => {
+    if (swiping) {
+      swiping = false;
+      const W = stage.clientWidth || window.innerWidth, thr = Math.min(80, W * 0.18);
+      if (swDx <= -thr) slideTo(idx + 1, -W);       // vuốt sang trái -> ảnh kế
+      else if (swDx >= thr) slideTo(idx - 1, W);    // vuốt sang phải -> ảnh trước
+      else { img.style.transition = 'transform .18s ease-out'; img.style.transform = 'translate(0,0) scale(1)'; }
+    }
+    end(); pinchD = 0;
+  });
   function dist(e) { const a = e.touches[0], b = e.touches[1]; return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY); }
 
   function key(e) { if (e.key === 'ArrowLeft') show(idx - 1); else if (e.key === 'ArrowRight') show(idx + 1); else if (e.key === 'Escape') close(); }
